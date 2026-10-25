@@ -1,0 +1,12 @@
+// trap: TYPE_MISMATCH 12:1
+// A trainer is not used after it is closed.
+load { trainer_open, trainer_close, trainer_eval_step } from oracle_train;
+typedef Trainer = abstract;
+let open: (Bytes, Bytes, Bytes, Bytes, I32) -> Dynamic = trainer_open;
+let close: (Trainer) -> Void = trainer_close;
+let evalStep: (Trainer, Bytes) -> Bytes = trainer_eval_step;
+let dir = "fixtures/training_api/";
+let t = open(dir + "checkpoint.ckpt", dir + "training_model.onnx", dir + "eval_model.onnx",
+  dir + "adamw.onnx", 1) as Trainer;
+close(t);
+evalStep(t, "\x00\x00\x00\x00")

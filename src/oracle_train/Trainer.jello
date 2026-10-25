@@ -1,0 +1,166 @@
+package oracle_train;
+
+/* Trainers: a model trained in ONNX Runtime, through its training API. A
+ * trainer holds the four artifacts ONNX Runtime's training needs: a
+ * checkpoint of the parameters, a training model that computes the loss and
+ * its gradients, an eval model that computes the loss alone, and an
+ * optimizer model that updates the parameters. onnxruntime-training's Python
+ * tools make them from an ONNX model.
+ *
+ * Batches are oracle tensors, matched to a model's inputs by name; a model
+ * leaves out those it does not take, so one batch serves both the training
+ * and the eval model. Opening, stepping and saving wait on ONNX Runtime, so
+ * they park only the process that calls them.
+ *
+ * A trainer stays in the process that opened it. Closing one frees it at
+ * once; a closed trainer traps when used. An unclosed trainer is freed when
+ * it is collected. */
+
+import type { Tensor } from oracle.Tensor;
+import { DType, encodeAll, decodeFrom } from oracle.Tensor;
+
+load {
+  training_available, trainer_open, trainer_open_bytes, trainer_close, trainer_train_step,
+  trainer_eval_step, trainer_save_checkpoint, trainer_export_inference
+} from oracle_train;
+
+// An ONNX Runtime training session and the checkpoint state it trains.
+typedef Handle = abstract;
+
+let _available: () -> Bool = training_available;
+/* A trainer, or Bytes saying why it would not open; the arguments are the
+ * checkpoint and the training, eval and optimizer models, as paths or as
+ * their contents, and the number of threads. */
+let _open: (Bytes, Bytes, Bytes, Bytes, I32) -> Dynamic = trainer_open;
+let _openBytes: (Bytes, Bytes, Bytes, Bytes, I32) -> Dynamic = trainer_open_bytes;
+let _close: (Handle) -> Void = trainer_close;
+/* Runs a step on the inputs, in oracle's wire format; a u32 status, then the
+ * outputs or why the step failed. */
+let _trainStep: (Handle, Bytes) -> Bytes = trainer_train_step;
+let _evalStep: (Handle, Bytes) -> Bytes = trainer_eval_step;
+// Saves the checkpoint to a path, with the optimizer's state or not; a u32 status, then why it failed.
+let _saveCheckpoint: (Handle, Bytes, Bool) -> Bytes = trainer_save_checkpoint;
+// Exports an inference model to a path, for the outputs named, each ending in a zero byte.
+let _exportInference: (Handle, Bytes, Bytes) -> Bytes = trainer_export_inference;
+
+const _STATUS_OK = 0;
+
+// Whether the ONNX Runtime underneath has its training API; plain inference builds do not.
+export let available = fn(): Bool { _available() };
+
+/* The four artifacts of a training run, as paths of files or as their
+ * contents: the checkpoint, and the training, eval and optimizer models. */
+export typedef Artifacts = {
+  let checkpoint: Bytes;
+  let trainingModel: Bytes;
+  let evalModel: Bytes;
+  let optimizerModel: Bytes;
+};
+
+// How to open a trainer: how many threads one step may use, 0 leaving the choice to ONNX Runtime.
+export typedef Options = { let threads: I32; };
+
+// The options a trainer opens with when given none: one thread.
+export let defaultOptions = fn(): Options { { threads: 1 } };
+
+// Throws the message after RAW's status when it is not OK.
+let _answer = fn(caller: Bytes, raw: Bytes): Null {
+  if (raw.readU32Le(0) != _STATUS_OK) { throw `Trainer.${caller}: ${raw.slice(4, raw.len() - 4)}`; }
+  null
+};
+
+/* A model in training. Make one with open or openBytes; train it with
+ * trainStep, measure it with evalStep or evalLoss, and keep what it learnt
+ * with saveCheckpoint or exportInference. */
+export typedef Trainer = { let handle: Handle; };
+export prototype Trainer {
+  init(handle: Handle) { this.handle = handle; };
+
+  // Frees the trainer now, rather than when it is collected; closing twice does nothing.
+  close(): Null { _close(this.handle); null };
+
+  /* One step of training on the batch INPUTS: the training model's forward
+   * and backward passes, then the optimizer's update of the parameters. The
+   * training model's outputs, the loss first for the models
+   * onnxruntime-training makes. Throws when an input is missing or ONNX
+   * Runtime refuses the batch. */
+  trainStep(inputs: Array<Tensor>): Array<Tensor> {
+    let raw = _trainStep(this.handle, encodeAll(inputs));
+    _answer("trainStep", raw);
+    decodeFrom(raw, 4)
+  };
+
+  /* The eval model's outputs for the batch INPUTS, on the parameters as they
+   * now are; nothing is trained. Throws as trainStep does. */
+  evalStep(inputs: Array<Tensor>): Array<Tensor> {
+    let raw = _evalStep(this.handle, encodeAll(inputs));
+    _answer("evalStep", raw);
+    decodeFrom(raw, 4)
+  };
+
+  /* The loss for the batch INPUTS: the first element of the eval model's
+   * first output. Throws as trainStep does, or when that output holds no F32
+   * or F64. */
+  evalLoss(inputs: Array<Tensor>): F64 {
+    let outputs = this.evalStep(inputs);
+    if (outputs.len() == 0) { throw "Trainer.evalLoss: the eval model gives no outputs"; }
+    let loss = outputs[0];
+    if (loss.elementCount() == 0) { throw `Trainer.evalLoss: ${loss.name} is empty`; }
+    if (loss.dtype == DType.F32) { return loss.data.readF32Le(0) as F64; }
+    if (loss.dtype == DType.F64) { return loss.data.readF64Le(0); }
+    throw `Trainer.evalLoss: ${loss.name} holds ${loss.dtype}, not F32 or F64`;
+  };
+
+  /* Saves the parameters to a checkpoint file at PATH, which open takes as
+   * Artifacts.checkpoint to train on from there; with the optimizer's state
+   * too when INCLUDEOPTIMIZER is true. Throws when it cannot be written. */
+  saveCheckpoint(path: Bytes, includeOptimizer: Bool = false): Null {
+    _answer("saveCheckpoint", _saveCheckpoint(this.handle, path, includeOptimizer))
+  };
+
+  /* Writes an inference model to PATH: the eval model, with the parameters
+   * as they now are, cut down to give only the outputs named in OUTPUTS. It
+   * loads in oracle.Session like any ONNX model. Throws when an output is not
+   * the eval model's or the file cannot be written. */
+  exportInference(path: Bytes, outputs: Array<Bytes>): Null {
+    if (outputs.len() == 0) { throw "Trainer.exportInference: no outputs are asked for"; }
+    for (name in outputs) {
+      if (name == "" || name.contains("\x00")) {
+        throw `Trainer.exportInference: ${name} cannot be the name of an output`;
+      }
+    }
+    let names = outputs.map(fn(n: Bytes): Bytes { n + "\x00" }).join("");
+    _answer("exportInference", _exportInference(this.handle, path, names))
+  };
+};
+
+// Makes a trainer of the handle, or throws the message the native gave instead.
+let _trainer = fn(caller: Bytes, opened: Dynamic): Trainer {
+  if (opened is Bytes) { throw `Trainer.${caller}: ${opened as Bytes}`; }
+  new Trainer(opened as Handle)
+};
+
+let _checked = fn(caller: Bytes, options: Options): Options {
+  if (options.threads < 0) { throw `Trainer.${caller}: threads cannot be negative`; }
+  options
+};
+
+/* Opens a trainer of the artifacts whose paths are in PATHS, with OPTIONS or
+ * else defaultOptions(). Throws when this ONNX Runtime has no training API,
+ * or an artifact cannot be read or loaded. The trainer reads the eval model
+ * again when it exports an inference model, so leave the file in place. */
+export let open = fn(paths: Artifacts, ?options: Options): Trainer {
+  let o = _checked("open", options ?? defaultOptions());
+  _trainer("open",
+    _open(paths.checkpoint, paths.trainingModel, paths.evalModel, paths.optimizerModel, o.threads))
+};
+
+/* Opens a trainer of the artifacts held in CONTENTS, as open does of files.
+ * They are written to a temporary directory of their own, which goes when
+ * the trainer is closed or collected. */
+export let openBytes = fn(contents: Artifacts, ?options: Options): Trainer {
+  let o = _checked("openBytes", options ?? defaultOptions());
+  let c = contents;
+  _trainer("openBytes",
+    _openBytes(c.checkpoint, c.trainingModel, c.evalModel, c.optimizerModel, o.threads))
+};

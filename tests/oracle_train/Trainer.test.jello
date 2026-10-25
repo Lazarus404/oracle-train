@@ -1,0 +1,199 @@
+package oracle_train;
+
+import type { Test } from std.testing;
+import std.testing as T;
+import type { Tensor } from oracle.Tensor;
+import { fromF32 } from oracle.Tensor;
+import { open as openSession } from oracle.Session;
+import { exists, readText, remove } from std.io.File;
+import { tempDir } from std.sys.Platform;
+import type { Trainer } from oracle_train.Trainer;
+import { available, open, openBytes, defaultOptions } from oracle_train.Trainer;
+import { version } from oracle_train.Meta;
+import { artifacts, batch, lossBefore, lossAfter } from oracle_train.Fixture;
+
+let noTraining = "this ONNX Runtime has no training API";
+
+// Stops the test, as skipped, when ONNX Runtime has no training API here.
+let needTraining = fn(t: Test) {
+  if (!available()) { T.skip(t, noTraining); }
+  null
+};
+
+let near = fn(got: F64, want: F64): Bool { got - want < 0.05 && want - got < 0.05 };
+
+// What F throws, or "" when it returns.
+let thrown = fn(f: () -> Null): Bytes {
+  try { f(); "" } catch (e) { e as Bytes }
+};
+
+// Trains TRAINER on the fixture's batch for STEPS steps.
+let train = fn(trainer: Trainer, steps: I32) {
+  let inputs = batch();
+  let i = 0;
+  while (i < steps) { trainer.trainStep(inputs); i++; }
+  null
+};
+
+let testVersion = fn(t: Test) {
+  T.equal(t, version(), "0.1.0");
+  null
+};
+
+let testDefaultOptions = fn(t: Test) {
+  T.equal(t, defaultOptions().threads, 1);
+  null
+};
+
+let testNegativeThreads = fn(t: Test) {
+  let message = thrown(fn() { open(artifacts(), { threads: -1 }); null });
+  T.equal(t, message, "Trainer.open: threads cannot be negative");
+  null
+};
+
+let testFixtureBatch = fn(t: Test) {
+  let inputs = batch();
+  T.equal(t, inputs.len(), 2);
+  T.equal(t, inputs[0].elementCount(), 1568);
+  T.equal(t, inputs[1].toI32(), [1, 1]);
+  T.isTrue(t, lossAfter() < lossBefore());
+  null
+};
+
+let testUnavailable = fn(t: Test) {
+  if (available()) { T.skip(t, "this ONNX Runtime has the training API"); }
+  let message = thrown(fn() { open(artifacts()); null });
+  T.isTrue(t, message.startsWith(`Trainer.open: ${noTraining}`));
+  null
+};
+
+let testTrainingLowersTheLoss = fn(t: Test) {
+  needTraining(t);
+  let inputs = batch();
+  let trainer = open(artifacts());
+  let before = trainer.evalLoss(inputs);
+  T.isTrue(t, near(before, lossBefore()));
+  let step = 0;
+  while (step < 100 && trainer.evalLoss(inputs) > lossAfter() * 1.05) {
+    let outputs = trainer.trainStep(inputs);
+    T.isTrue(t, outputs.len() > 0);
+    step++;
+  }
+  let after = trainer.evalLoss(inputs);
+  T.isTrue(t, after < before);
+  T.isTrue(t, near(after, lossAfter()));
+  trainer.close();
+  null
+};
+
+let testEvalStepGivesTheLossFirst = fn(t: Test) {
+  needTraining(t);
+  let trainer = open(artifacts());
+  let outputs = trainer.evalStep(batch());
+  T.isTrue(t, near(outputs[0].toF32()[0] as F64, lossBefore()));
+  trainer.close();
+  null
+};
+
+let testExportInference = fn(t: Test) {
+  needTraining(t);
+  let path = tempDir() + "/oracle_train_inference.onnx";
+  let trainer = open(artifacts());
+  train(trainer, 10);
+  trainer.exportInference(path, ["output-0"]);
+  trainer.close();
+  let session = openSession(path);
+  T.equal(t, session.inputNames(), ["input-0"]);
+  T.equal(t, session.outputNames(), ["output-0"]);
+  let scores = session.run([batch()[0]])[0];
+  T.equal(t, scores.name, "output-0");
+  T.equal(t, scores.elementCount(), 20);
+  session.close();
+  remove(path);
+  null
+};
+
+let testExportUnknownOutput = fn(t: Test) {
+  needTraining(t);
+  let trainer = open(artifacts());
+  let message = thrown(fn() {
+    trainer.exportInference(tempDir() + "/oracle_train_unknown.onnx", ["no-such-output"]);
+    null
+  });
+  T.isTrue(t, message.startsWith("Trainer.exportInference: "));
+  T.throws(t, fn() { trainer.exportInference("x.onnx", []); null });
+  trainer.close();
+  null
+};
+
+let testSaveCheckpointAndResume = fn(t: Test) {
+  needTraining(t);
+  let path = tempDir() + "/oracle_train_step.ckpt";
+  let inputs = batch();
+  let trainer = open(artifacts());
+  train(trainer, 5);
+  let trained = trainer.evalLoss(inputs);
+  trainer.saveCheckpoint(path);
+  trainer.close();
+  T.isTrue(t, exists(path));
+  let resumed = open({ checkpoint: path, trainingModel: artifacts().trainingModel,
+    evalModel: artifacts().evalModel, optimizerModel: artifacts().optimizerModel });
+  T.isTrue(t, near(resumed.evalLoss(inputs), trained));
+  resumed.close();
+  remove(path);
+  null
+};
+
+let testOpenBytes = fn(t: Test) {
+  needTraining(t);
+  let paths = artifacts();
+  let trainer = openBytes({
+    checkpoint: readText(paths.checkpoint),
+    trainingModel: readText(paths.trainingModel),
+    evalModel: readText(paths.evalModel),
+    optimizerModel: readText(paths.optimizerModel),
+  });
+  let inputs = batch();
+  let before = trainer.evalLoss(inputs);
+  train(trainer, 5);
+  T.isTrue(t, trainer.evalLoss(inputs) < before);
+  let path = tempDir() + "/oracle_train_bytes.onnx";
+  trainer.exportInference(path, ["output-0"]);
+  T.isTrue(t, exists(path));
+  trainer.close();
+  remove(path);
+  null
+};
+
+let testMissingInput = fn(t: Test) {
+  needTraining(t);
+  let trainer = open(artifacts());
+  let inputs: Array<Tensor> = [batch()[0]];
+  let message = thrown(fn() { trainer.trainStep(inputs); null });
+  T.equal(t, message, "Trainer.trainStep: the input labels is missing");
+  let renamed = [batch()[0], fromF32("other", [2], [1.0, 1.0])];
+  T.equal(t, thrown(fn() { trainer.evalStep(renamed); null }),
+    "Trainer.evalStep: the input labels is missing");
+  trainer.close();
+  null
+};
+
+let testMissingFile = fn(t: Test) {
+  needTraining(t);
+  let paths = artifacts();
+  let message = thrown(fn() {
+    open({ checkpoint: "no/such.ckpt", trainingModel: paths.trainingModel,
+      evalModel: paths.evalModel, optimizerModel: paths.optimizerModel });
+    null
+  });
+  T.isTrue(t, message.startsWith("Trainer.open: cannot load the checkpoint: "));
+  null
+};
+
+let testCloseTwice = fn(t: Test) {
+  needTraining(t);
+  let trainer = open(artifacts());
+  trainer.close();
+  trainer.close();
+  null
+};

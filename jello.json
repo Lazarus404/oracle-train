@@ -1,0 +1,12 @@
+{
+  "name": "oracle-train",
+  "version": "0.1.0",
+  "description": "ONNX Runtime training for Jello: train steps, checkpoints and inference export",
+  "dependencies": {
+    "oracle": {"github": "Lazarus404/oracle", "tag": "0.1.0"}
+  },
+  "dev_dependencies": {
+    "degust": {"github": "Lazarus404/degust", "tag": "0.1.0"}
+  },
+  "package_paths": [".."]
+}

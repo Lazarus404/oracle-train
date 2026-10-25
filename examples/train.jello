@@ -1,0 +1,43 @@
+// expect: the loss fell: true
+// expect: the inference model takes input-0 and gives output-0
+// expect: 2 rows of 10 scores
+/* Trains ONNX Runtime's small test classifier for ten steps on one batch,
+ * exports an inference model, and runs that with oracle. */
+import { open } from oracle_train.Trainer;
+import { open as openSession } from oracle.Session;
+import { fromF32, fromI32 } from oracle.Tensor;
+import { readText } from std.io.File;
+import { tempDir } from std.sys.Platform;
+
+let dir = "fixtures/training_api";
+
+// The numbers on the second line of one of ONNX Runtime's test files.
+let numbers = fn(file: Bytes): Array<F64> {
+  let line = readText(`${dir}/${file}`).split("\n")[1].trim();
+  line.replaceAll("[", "").replaceAll("]", "").split(",").map(fn(n: Bytes): F64 { Float.parse(n) })
+};
+
+let pixels = numbers("input-0.in").map(fn(v: F64): F32 { v as F32 });
+let labels = numbers("labels.in").map(fn(v: F64): I32 { v as I32 });
+let batch = [fromF32("input-0", [2, 784], pixels), fromI32("labels", [2], labels)];
+
+let trainer = open({
+  checkpoint: `${dir}/checkpoint.ckpt`,
+  trainingModel: `${dir}/training_model.onnx`,
+  evalModel: `${dir}/eval_model.onnx`,
+  optimizerModel: `${dir}/adamw.onnx`,
+});
+let before = trainer.evalLoss(batch);
+let step = 0;
+while (step < 10) { trainer.trainStep(batch); step++; }
+let after = trainer.evalLoss(batch);
+let path = tempDir() + "/oracle_train_example.onnx";
+trainer.exportInference(path, ["output-0"]);
+trainer.close();
+
+let session = openSession(path);
+let scores = session.run([batch[0]])[0];
+session.close();
+`the loss fell: ${after < before}\n`
+  + `the inference model takes ${session.inputNames().join(", ")} and gives ${session.outputNames().join(", ")}\n`
+  + `${scores.shape[0]} rows of ${scores.shape[1]} scores`

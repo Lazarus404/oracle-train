@@ -1,0 +1,17 @@
+import type { Test } from std.testing;
+import std.testing as T;
+import { run } from degust.Programs;
+import { available } from oracle_train.Trainer;
+
+/* The examples, and the programs that check what a test cannot, such as traps.
+ * Each trains, so they wait for an ONNX Runtime with the training API. */
+let testExamples = fn(t: Test) {
+  if (!available()) { T.skip(t, "this ONNX Runtime has no training API"); }
+  run(t, "examples");
+  null
+};
+let testPrograms = fn(t: Test) {
+  if (!available()) { T.skip(t, "this ONNX Runtime has no training API"); }
+  run(t, "tests/programs");
+  null
+};

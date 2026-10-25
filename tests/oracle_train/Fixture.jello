@@ -1,0 +1,40 @@
+package oracle_train;
+
+/* The fixtures in fixtures/training_api: ONNX Runtime's own test artifacts
+ * for its training API, a small classifier of 784 inputs and 10 classes, with
+ * one batch of two rows and the eval losses before and after training on it. */
+
+import type { Tensor } from oracle.Tensor;
+import { fromF32, fromI32 } from oracle.Tensor;
+import type { Artifacts } from oracle_train.Trainer;
+import { readText } from std.io.File;
+
+export let dir = "fixtures/training_api";
+
+// The fixture's artifacts, as paths.
+export let artifacts = fn(): Artifacts {
+  {
+    checkpoint: `${dir}/checkpoint.ckpt`,
+    trainingModel: `${dir}/training_model.onnx`,
+    evalModel: `${dir}/eval_model.onnx`,
+    optimizerModel: `${dir}/adamw.onnx`,
+  }
+};
+
+/* The numbers in a fixture file: its first line names it, and its second
+ * holds the numbers, separated by commas and perhaps in brackets. */
+let _numbers = fn(file: Bytes): Array<F64> {
+  let line = readText(`${dir}/${file}`).split("\n")[1].trim();
+  line.replaceAll("[", "").replaceAll("]", "").split(",").map(fn(n: Bytes): F64 { Float.parse(n.trim()) })
+};
+
+// The batch: input-0, two rows of 784 F32s, and labels, the class of each row.
+export let batch = fn(): Array<Tensor> {
+  let pixels = _numbers("input-0.in").map(fn(v: F64): F32 { v as F32 });
+  let labels = _numbers("labels.in").map(fn(v: F64): I32 { v as I32 });
+  [fromF32("input-0", [2, 784], pixels), fromI32("labels", [2], labels)]
+};
+
+// The eval loss before training on the batch, and after.
+export let lossBefore = fn(): F64 { _numbers("loss_1.out")[0] };
+export let lossAfter = fn(): F64 { _numbers("loss_2.out")[0] };

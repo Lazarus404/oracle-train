@@ -1,0 +1,4 @@
+package oracle_train;
+
+// The version of the oracle-train package.
+export let version = fn(): Bytes { "0.1.0" };
